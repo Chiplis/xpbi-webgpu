@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XPBI — Position-Based Continuum Inelasticity</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f25; --text: #e8eaf0; --dim: #9aa1ad;
+    --accent: #e0a458; --border: #2a2e36;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, "SF Pro Text", Helvetica, Arial, sans-serif;
+    display: flex; overflow: hidden;
+  }
+  #gpu { flex: 1; min-width: 0; height: 100%; display: block; cursor: grab; touch-action: none; }
+  #gpu:active { cursor: grabbing; }
+  #panel {
+    width: 300px; flex: none; background: var(--panel); border-left: 1px solid var(--border);
+    padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px;
+  }
+  h1 { font-size: 16px; font-weight: 650; letter-spacing: 0.01em; }
+  h1 small { color: var(--dim); font-weight: 400; font-size: 11px; display: block; margin-top: 2px; }
+  select, button {
+    width: 100%; background: #262a32; color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; font: inherit; cursor: pointer;
+  }
+  select:hover, button:hover { border-color: #3a3f4a; }
+  button.active { border-color: var(--accent); color: var(--accent); }
+  .btnrow { display: flex; gap: 8px; }
+  .btnrow button { flex: 1; }
+  #info { color: var(--dim); font-size: 12.5px; }
+  #stats { color: var(--accent); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  #err { color: #ff7676; font-size: 12px; white-space: pre-wrap; }
+  .srow { display: grid; grid-template-columns: 1fr; gap: 2px; margin-bottom: 8px; }
+  .srow label { font-size: 12px; color: var(--dim); }
+  .srow span { font-size: 11px; color: var(--text); text-align: right; margin-top: -18px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .hint { font-size: 11.5px; color: var(--dim); border-top: 1px solid var(--border); padding-top: 10px; }
+  .hint b { color: var(--text); font-weight: 600; }
+  a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+  <canvas id="gpu"></canvas>
+  <div id="panel">
+    <h1>XPBI<small>Position-Based Dynamics with Smoothing Kernels Handles Continuum Inelasticity — Yu, Li, Lan, Yang &amp; Jiang, SIGGRAPH 2024 (<a href="https://arxiv.org/abs/2405.11694" target="_blank">arXiv:2405.11694</a>)</small></h1>
+    <select id="scene"></select>
+    <div class="btnrow">
+      <button id="pause">Pause</button>
+      <button id="reset">Reset</button>
+      <button id="poke">Poke (G)</button>
+    </div>
+    <div id="stats">…</div>
+    <div id="info"></div>
+    <div id="sliders"></div>
+    <div class="hint">
+      <b>Drag</b> orbit · <b>wheel</b> zoom · <b>Shift-drag</b> or <b>Poke mode</b> push a sphere
+      through the material · <b>Space</b> pause.<br><br>
+      Full GPU implementation: velocity-based XPBD, SPH velocity gradients with
+      Bonet–Lok correction, implicit in-loop plasticity (Drucker-Prager, NACC,
+      Von Mises, Herschel-Bulkley, snow clamp), XSPH, position correction, PBF coupling.
+    </div>
+    <div id="err"></div>
+  </div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

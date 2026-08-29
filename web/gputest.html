@@ -1,0 +1,22 @@
+<!doctype html><meta charset="utf-8"><title>webgpu test</title>
+<pre id="out">testing…</pre>
+<script>
+(async () => {
+  const out = document.getElementById('out');
+  try {
+    if (!navigator.gpu) { out.textContent = 'NO navigator.gpu'; return; }
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) { out.textContent = 'navigator.gpu present, NO adapter'; return; }
+    const info = adapter.info || {};
+    const device = await adapter.requestDevice();
+    out.textContent = 'WEBGPU OK\n' + JSON.stringify({
+      vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description,
+      maxComputeWorkgroupSizeX: adapter.limits.maxComputeWorkgroupSizeX,
+      maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+      maxComputeInvocationsPerWorkgroup: adapter.limits.maxComputeInvocationsPerWorkgroup,
+      f16: adapter.features.has('shader-f16'),
+      timestamp: adapter.features.has('timestamp-query'),
+    }, null, 2);
+  } catch (e) { out.textContent = 'ERROR: ' + e; }
+})();
+</script>
