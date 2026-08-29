@@ -62,9 +62,11 @@ Everything in the paper's method and algorithm sections, on the GPU:
   spacing r (Table 2 note). Particle data is physically reordered into cell
   order every substep so neighbor gathers are cache-coherent — this alone is
   worth ~3× on Apple GPUs.
-- **Performance** (M-series Mac, Chrome): 25–60 fps at 4k–28k particles with
-  200–300 substeps/s — comparable real-time throughput to the paper's own
-  interactive Jacobi demo, from inside a browser.
+- **Performance** (M-series Mac, Chrome): 40–60 fps at 4k–28k particles with
+  160–300 substeps/s. The hot neighbor loops are tuned for Apple GPUs: sorted
+  particle data (cache-coherent gathers), row-merged cell ranges (9 range
+  lookups per stencil instead of 27), V^n packed into vel.w (two vec4 loads
+  per neighbor instead of three), and a fused constraint-gather + contact pass.
 - **PBF water** (Macklin & Müller 2013): density constraint with CFM relaxation,
   s_corr anti-clustering, poly6/spiky kernels, two-way coupling with XPBI solids
   through the shared neighborhood.

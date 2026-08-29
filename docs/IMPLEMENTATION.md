@@ -96,6 +96,13 @@ Macklin et al. 2014's unified solver).
    (pos/vel/F/aux) are physically permuted into cell order every substep so
    the memory-bound neighbor gathers are cache-coherent and indirection-free
    (a further ~3×; `stagePVA`/`applyPVA`/`stageF`/`applyF`).
+7. **Neighbor-loop micro-optimizations** (a further ~1.3–1.6×): stencil rows
+   merged into single ranges (x-adjacent cells are contiguous in the flat grid
+   index, so 9 lookups replace 27 and inner loops run longer contiguous spans);
+   V^n duplicated into vel.w so the gradient/denominator/XSPH loops load two
+   vec4s per neighbor instead of three; solveB's constraint-Δv gather and the
+   contact correction fused into one stencil sweep (contact candidates go one
+   half-iteration stale, which Jacobi tolerates).
 7. **Not implemented** from the demo suite: mesh-based cloth coupling (Fig. 3)
    and LBVH point-triangle collision (§5's timing breakdown) — the demo uses
    analytic boundaries (box, kinematic sphere) instead; the constraint framework

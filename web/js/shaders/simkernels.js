@@ -56,14 +56,21 @@ fn storeSpSelf(i : u32, m : mat3x3f, s : vec3f) {
   SpBuf[3u*i+2u] = vec4f(m[2], s.z);
 }
 
-// [begin, end) range of a neighbor cell in sortedIdx; (0,0) if out of grid
-fn cellRange(nc : vec3i) -> vec2u {
-  if (any(nc < vec3i(0)) || any(nc >= P.gridDims)) { return vec2u(0u, 0u); }
-  let nci = cellIndex(nc);
-  let beg = cellTabR[nci];
+// [begin, end) range of a whole stencil ROW (3 x-adjacent cells): x-adjacent
+// cells are contiguous in the flat index, so one span covers all three.
+// 9 lookups (18 loads) per stencil instead of 27 (54), and longer inner loops.
+fn rowRange(c : vec3i) -> vec2u {
+  if (c.y < 0 || c.y >= P.gridDims.y || c.z < 0 || c.z >= P.gridDims.z) {
+    return vec2u(0u, 0u);
+  }
+  let x0 = max(c.x - 1, 0);
+  let x1 = min(c.x + 1, P.gridDims.x - 1);
+  let c0 = cellIndex(vec3i(x0, c.y, c.z));
+  let c2 = cellIndex(vec3i(x1, c.y, c.z));
+  let beg = cellTabR[c0];
   var end = P.N;
-  if (nci + 1u < P.numCells) { end = cellTabR[nci + 1u]; }
-  return vec2u(beg, min(end, beg + 128u));
+  if (c2 + 1u < P.numCells) { end = cellTabR[c2 + 1u]; }
+  return vec2u(beg, min(end, beg + 384u));
 }
 
 // ---------------- counting-sort grid ----------------
@@ -130,9 +137,12 @@ fn scatter(@builtin(global_invocation_id) gid : vec3u) {
   let c = cellIndex(cellCoord(pos[i].xyz));
   let dst = atomicSub(&cellTab[c], 1u) - 1u;
   sortedIdx[dst] = i;
-  aux[i].x = P.V0 * clamp(determinant(Fbuf[i]), 0.1, 10.0);
+  // Vn lives in BOTH aux.x and velIn.w: the hot neighbor loops read it from
+  // velIn.w so pos+vel are the only per-neighbor loads (one less vec4 each)
+  let Vn = P.V0 * clamp(determinant(Fbuf[i]), 0.1, 10.0);
+  aux[i].x = Vn;
   let v = velIn[i].xyz + P.dt * P.gravity;
-  velIn[i] = vec4f(v, 0.0);
+  velIn[i] = vec4f(v, Vn);
   aux[i].y = 0.0; // lambda
 }
 
@@ -185,20 +195,18 @@ fn computeL(@builtin(global_invocation_id) gid : vec3u) {
   let cc = cellCoord(xi);
   for (var dz = -1; dz <= 1; dz++) {
   for (var dy = -1; dy <= 1; dy++) {
-  for (var dx = -1; dx <= 1; dx++) {
-    let rge = cellRange(cc + vec3i(dx, dy, dz));
-    for (var j = rge.x; j < rge.y; j++) {
-      let b = j;
+    let rge = rowRange(cc + vec3i(0, dy, dz));
+    for (var b = rge.x; b < rge.y; b++) {
       if (b != i) {
         let dxv = xi - pos[b].xyz;
         if (dot(dxv, dxv) < P.support * P.support) {
           let g = kernelGradW(dxv);
           let r = pos[b].xyz - xi;
-          A = A + mat3x3f(g * r.x, g * r.y, g * r.z) * aux[b].x;
+          A = A + mat3x3f(g * r.x, g * r.y, g * r.z) * velIn[b].w;
         }
       }
     }
-  }}}
+  }}
   // SVD pseudo-inverse for stability (paper Sec 3.2). A healthy neighborhood
   // gives A ~ identity, so directions with tiny singular values are DEFICIENT
   // (free surface, carved hole) — drop them instead of amplifying them.
@@ -220,20 +228,19 @@ fn velocityGradient(i : u32, xi : vec3f) -> mat3x3f {
   let cc = cellCoord(xi);
   for (var dz = -1; dz <= 1; dz++) {
   for (var dy = -1; dy <= 1; dy++) {
-  for (var dx = -1; dx <= 1; dx++) {
-    let rge = cellRange(cc + vec3i(dx, dy, dz));
-    for (var j = rge.x; j < rge.y; j++) {
-      let b = j;
+    let rge = rowRange(cc + vec3i(0, dy, dz));
+    for (var b = rge.x; b < rge.y; b++) {
       if (b != i && isSolid(matOf(b))) {
         let dxv = xi - pos[b].xyz;
         if (dot(dxv, dxv) < P.support * P.support) {
           let gt = Li * kernelGradW(dxv);
-          let dv = (velIn[b].xyz - vi) * aux[b].x;
+          let vb = velIn[b];              // xyz = velocity, w = Vn
+          let dv = (vb.xyz - vi) * vb.w;
           G = G + mat3x3f(dv * gt.x, dv * gt.y, dv * gt.z);
         }
       }
     }
-  }}}
+  }}
   return G;
 }
 
@@ -276,21 +283,20 @@ fn solveA(@builtin(global_invocation_id) gid : vec3u) {
   let cc = cellCoord(xi);
   for (var dz = -1; dz <= 1; dz++) {
   for (var dy = -1; dy <= 1; dy++) {
-  for (var dx = -1; dx <= 1; dx++) {
-    let rge = cellRange(cc + vec3i(dx, dy, dz));
-    for (var j = rge.x; j < rge.y; j++) {
-      let b = j;
+    let rge = rowRange(cc + vec3i(0, dy, dz));
+    for (var b = rge.x; b < rge.y; b++) {
       if (b != i && isSolid(matOf(b))) {
         let dxv = xi - pos[b].xyz;
         if (dot(dxv, dxv) < P.support * P.support) {
-          let gb = aux[b].x * (GL * kernelGradW(dxv));
+          let vb = velIn[b];              // xyz = velocity, w = Vn
+          let gb = vb.w * (GL * kernelGradW(dxv));
           denom = denom + dot(gb, gb) / MATS[matOf(b)].mass;
           sgrad = sgrad - gb;
-          cdot = cdot + dot(gb, velIn[b].xyz);
+          cdot = cdot + dot(gb, vb.xyz);
         }
       }
     }
-  }}}
+  }}
   denom = denom + dot(sgrad, sgrad) / m.mass;
   cdot = cdot + dot(sgrad, velIn[i].xyz);
   let alphaT = (1.0 / P.V0) / (P.dt * P.dt);
@@ -312,28 +318,41 @@ fn solveB(@builtin(global_invocation_id) gid : vec3u) {
   if (i >= P.N) { return; }
   let mi = matOf(i);
   var dv = vec3f(0.0);
+  var corr = vec3f(0.0);
   let xi = pos[i].xyz;
   let m = MATS[mi];
   let solid = isSolid(mi);
   let cc = cellCoord(xi);
   if (solid) {
+    // fused loop: constraint dv gather (Eq. 18) + contact correction (Eq. 21)
+    // in one stencil sweep. Contact candidates use pre-update velocities
+    // (one half-iteration stale), which is fine under Jacobi.
     dv = loadSelfDv(i); // own constraint self-gradient term
-    let Vi = aux[i].x;
+    let Vi = velIn[i].w;
+    let xci = xi + P.dt * velIn[i].xyz;
+    let minD = 0.75 * P.h;
     for (var dz = -1; dz <= 1; dz++) {
     for (var dy = -1; dy <= 1; dy++) {
-    for (var dx = -1; dx <= 1; dx++) {
-      let rge = cellRange(cc + vec3i(dx, dy, dz));
-      for (var j = rge.x; j < rge.y; j++) {
-        let p = j;
-        if (p != i && isSolid(matOf(p))) {
-          let dxv = pos[p].xyz - xi;  // x_p - x_i
-          if (dot(dxv, dxv) < P.support * P.support) {
-            // grad_{x_i} C_p = V_i * G_p L_p gradW_i(x_p); Sp already holds dlam*G*L
-            dv = dv + Vi * (loadSp(p) * kernelGradW(dxv));
+      let rge = rowRange(cc + vec3i(0, dy, dz));
+      for (var b = rge.x; b < rge.y; b++) {
+        if (b != i && isSolid(matOf(b))) {
+          let pb = pos[b].xyz;
+          let dxp = pb - xi;  // x_b - x_i
+          if (dot(dxp, dxp) < P.support * P.support) {
+            // grad_{x_i} C_b = V_i * G_b L_b gradW_i(x_b); Sp holds dlam*G*L
+            dv = dv + Vi * (loadSp(b) * kernelGradW(dxp));
+            let xcb = pb + P.dt * velIn[b].xyz;
+            let dxc = xci - xcb;
+            let dist = length(dxc);
+            if (dist < minD && dist > 1e-9) {
+              let mb = MATS[matOf(b)].mass;
+              let w = mb / (m.mass + mb);
+              corr = corr + dxc / dist * ((minD - dist) * w);
+            }
           }
         }
       }
-    }}}
+    }}
   }
   // cap the per-iteration constraint impulse: far above any healthy update,
   // but arrests Jacobi feedback blowups seeded by sharp velocity kicks
@@ -341,34 +360,9 @@ fn solveB(@builtin(global_invocation_id) gid : vec3u) {
   let dvl = length(dvv);
   let dvCap = 0.2 * P.support / P.dt;
   if (dvl > dvCap) { dvv = dvv * (dvCap / dvl); }
-  var v = velIn[i].xyz + dvv;
-  if (solid) {
-    // pairwise distance constraint on candidate positions (paper Eq. 21)
-    var corr = vec3f(0.0);
-    let xci = xi + P.dt * v;
-    let minD = 0.75 * P.h;
-    for (var dz = -1; dz <= 1; dz++) {
-    for (var dy = -1; dy <= 1; dy++) {
-    for (var dx = -1; dx <= 1; dx++) {
-      let rge = cellRange(cc + vec3i(dx, dy, dz));
-      for (var j = rge.x; j < rge.y; j++) {
-        let b = j;
-        if (b != i && isSolid(matOf(b))) {
-          let xcb = pos[b].xyz + P.dt * velIn[b].xyz;
-          let dxv = xci - xcb;
-          let dist = length(dxv);
-          if (dist < minD && dist > 1e-9) {
-            let mb = MATS[matOf(b)].mass;
-            let w = mb / (m.mass + mb);
-            corr = corr + dxv / dist * ((minD - dist) * w);
-          }
-        }
-      }
-    }}}
-    v = v + corr * (P.contactOmega / P.dt);
-  }
+  var v = velIn[i].xyz + dvv + corr * (P.contactOmega / P.dt);
   v = applyBoundary(xi + P.dt * v, v, xi, m.boundFriction);
-  velOut[i] = vec4f(v, 0.0);
+  velOut[i] = vec4f(v, velIn[i].w);
 }
 
 // ---------------- contacts: position correction (Eq. 21) + boundaries ----------------
@@ -425,10 +419,8 @@ fn pbfA(@builtin(global_invocation_id) gid : vec3u) {
   let cc = cellCoord(xn);
   for (var dz = -1; dz <= 1; dz++) {
   for (var dy = -1; dy <= 1; dy++) {
-  for (var dx = -1; dx <= 1; dx++) {
-    let rge = cellRange(cc + vec3i(dx, dy, dz));
-    for (var j = rge.x; j < rge.y; j++) {
-      let b = j;
+    let rge = rowRange(cc + vec3i(0, dy, dz));
+    for (var b = rge.x; b < rge.y; b++) {
       if (b != i) {
         let xcb = pos[b].xyz + P.dt * velIn[b].xyz;
         let dxv = xci - xcb;
@@ -441,7 +433,7 @@ fn pbfA(@builtin(global_invocation_id) gid : vec3u) {
         }
       }
     }
-  }}}
+  }}
   let C = max(rho / rho0 - 1.0, 0.0); // unilateral: only fix compression
   aux[i].w = -C / (grad2 + dot(gradSum, gradSum) + P.pbfEps);
 }
@@ -459,10 +451,8 @@ fn pbfB(@builtin(global_invocation_id) gid : vec3u) {
   let iAmWater = !isSolid(mi);
   for (var dz = -1; dz <= 1; dz++) {
   for (var dy = -1; dy <= 1; dy++) {
-  for (var dx = -1; dx <= 1; dx++) {
-    let rge = cellRange(cc + vec3i(dx, dy, dz));
-    for (var j = rge.x; j < rge.y; j++) {
-      let b = j;
+    let rge = rowRange(cc + vec3i(0, dy, dz));
+    for (var b = rge.x; b < rge.y; b++) {
       if (b != i) {
         let bWater = !isSolid(matOf(b));
         if (iAmWater || bWater) {
@@ -479,11 +469,11 @@ fn pbfB(@builtin(global_invocation_id) gid : vec3u) {
         }
       }
     }
-  }}}
+  }}
   // Δp is a position-space correction; convert to velocity. Solids only feel
   // half (one-way-ish coupling keeps the levee from being blasted apart).
   let scale = select(0.5, 1.0, iAmWater);
-  velOut[i] = vec4f(velIn[i].xyz + dp * (scale / P.dt), 0.0);
+  velOut[i] = vec4f(velIn[i].xyz + dp * (scale / P.dt), velIn[i].w);
 }
 
 // ---------------- XSPH (Eq. 20) ----------------
@@ -499,22 +489,21 @@ fn xsph(@builtin(global_invocation_id) gid : vec3u) {
   let cc = cellCoord(xi);
   for (var dz = -1; dz <= 1; dz++) {
   for (var dy = -1; dy <= 1; dy++) {
-  for (var dx = -1; dx <= 1; dx++) {
-    let rge = cellRange(cc + vec3i(dx, dy, dz));
-    for (var j = rge.x; j < rge.y; j++) {
-      let b = j;
+    let rge = rowRange(cc + vec3i(0, dy, dz));
+    for (var b = rge.x; b < rge.y; b++) {
       if (b != i && (isSolid(matOf(b)) == iSolid)) {
         let dxv = xi - pos[b].xyz;
         if (dot(dxv, dxv) < P.support * P.support) {
-          acc = acc + aux[b].x * (velIn[b].xyz - vi) * kernelW(length(dxv));
+          let vb = velIn[b];              // xyz = velocity, w = Vn
+          acc = acc + vb.w * (vb.xyz - vi) * kernelW(length(dxv));
         }
       }
     }
-  }}}
+  }}
   // water gets stronger XSPH (PBF viscosity), solids the paper's c = 0.01
   var c = P.xsphC;
   if (!iSolid) { c = P.xsphC * 10.0; }
-  velOut[i] = vec4f(vi + c * acc, 0.0);
+  velOut[i] = vec4f(vi + c * acc, velIn[i].w);
 }
 
 // ---------------- final F update (Eq. 22) + plastic state ----------------
@@ -546,7 +535,7 @@ fn integrate(@builtin(global_invocation_id) gid : vec3u) {
   let vmax = 0.45 * P.support / P.dt;
   let vl = length(v);
   if (vl > vmax) { v = v * (vmax / vl); }
-  velIn[i] = vec4f(v, 0.0);
+  velIn[i] = vec4f(v, velIn[i].w);
   var x = pos[i].xyz + P.dt * v;
   x = clamp(x, P.domainMin, P.domainMax);
   pos[i] = vec4f(x, pos[i].w);
